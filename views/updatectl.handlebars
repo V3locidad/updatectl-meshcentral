@@ -55,10 +55,11 @@
   </div>
 
   <div class="col">
-    <h3 id="rightTitle" style="display:flex;align-items:center;gap:8px">
-      <span style="flex:1">Sélectionne un poste</span>
-      <label style="font-size:11px;font-weight:normal" title="Force la session WU à parler directement à Windows Update (ignore WSUS local). Utile si le WSUS est en panne ou si le poste a une GPO WSUS cassée."><input type="checkbox" id="bypassWsus"> Bypass WSUS</label>
-    </h3>
+    <h3 id="rightTitle">Sélectionne un poste</h3>
+    <div class="bar" style="padding:6px 10px;border-bottom:1px solid #eee;background:#fbfbfb;font-size:12px">
+      <label title="Force la session WU à parler directement à Windows Update (ignore WSUS local). Utile si le WSUS est en panne ou si le poste a une GPO WSUS cassée."><input type="checkbox" id="bypassWsus"> Bypass WSUS</label>
+      <span style="color:#888;margin-left:8px">— ignore le WSUS configuré sur le poste</span>
+    </div>
     <div id="rightBody" class="body"><div class="empty">Choisis un poste à gauche pour interroger Windows Update.</div></div>
   </div>
 </div>

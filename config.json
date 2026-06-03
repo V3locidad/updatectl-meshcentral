@@ -1,0 +1,14 @@
+{
+  "name": "updatectl",
+  "shortName": "updatectl",
+  "version": "0.0.1",
+  "author": "V3locidad",
+  "description": "Inventaire et installation des Windows Updates à distance via MeshCentral (COM Microsoft.Update.Session, fonctionne en SYSTEM).",
+  "hasAdminPanel": true,
+  "homepage": "https://github.com/V3locidad/updatectl-meshcentral",
+  "changelogUrl": "https://raw.githubusercontent.com/V3locidad/updatectl-meshcentral/main/changelog.md",
+  "configUrl": "https://raw.githubusercontent.com/V3locidad/updatectl-meshcentral/main/config.json",
+  "downloadUrl": "https://github.com/V3locidad/updatectl-meshcentral/archive/refs/heads/main.zip",
+  "repository": { "type": "git", "url": "https://github.com/V3locidad/updatectl-meshcentral.git" },
+  "meshCentralCompat": ">=1.1.0"
+}

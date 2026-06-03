@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>updatectl</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, sans-serif; margin: 10px; font-size: 13px; }
+  h2 { margin: 0 0 8px 0; }
+  .pill { display: inline-block; padding: 1px 8px; font-size: 11px; background: #e6e6e6; border-radius: 9px; vertical-align: middle; }
+  .bar { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid #ddd; margin-bottom: 8px; }
+  .bar input[type=text] { flex: 1; padding: 3px 6px; border: 1px solid #bbb; border-radius: 3px; }
+  .cols { display: grid; grid-template-columns: 320px 1fr; gap: 10px; }
+  .col { border: 1px solid #ddd; border-radius: 4px; overflow: hidden; display: flex; flex-direction: column; min-height: 500px; }
+  .col h3 { margin: 0; padding: 6px 8px; background: #f4f4f4; border-bottom: 1px solid #ddd; font-size: 13px; }
+  .body { overflow: auto; flex: 1; }
+  .row { padding: 6px 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+  .row:hover { background: #f8f8ff; }
+  .row.selected { background: #eef6ff; }
+  .row .name { flex: 1; }
+  .row .sub { color: #888; font-size: 11px; }
+  .statusDot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,0.15); flex: 0 0 auto; }
+  .statusDot.on { background: #2ecc40; }
+  .statusDot.off { background: #d9534f; }
+  .empty { padding: 20px; color: #999; text-align: center; }
+  .infoBlock { padding: 10px; background: #f9f9f9; border-bottom: 1px solid #eee; display: flex; gap: 16px; flex-wrap: wrap; }
+  .infoBlock .it { font-size: 12px; }
+  .infoBlock .it b { display: block; color: #555; font-size: 11px; }
+  .updTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .updTable th, .updTable td { padding: 5px 8px; border-bottom: 1px solid #f0f0f0; text-align: left; vertical-align: top; }
+  .updTable th { background: #fafafa; position: sticky; top: 0; }
+  .sev-Critical { color: #c0392b; font-weight: bold; }
+  .sev-Important { color: #d68910; font-weight: bold; }
+  .toolbar { padding: 6px 10px; background: #f4f4f4; border-bottom: 1px solid #ddd; display: flex; gap: 8px; align-items: center; }
+  button { padding: 3px 8px; border: 1px solid #cfd5db; background: #f6f8fa; border-radius: 3px; cursor: pointer; font-size: 12px; }
+  button.primary { background: #0d6efd; color: #fff; border-color: #0d6efd; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #e6e6e6; }
+  .badge.warn { background: #fff3cd; color: #856404; }
+  .badge.danger { background: #f8d7da; color: #721c24; }
+  pre { background: #1e1e1e; color: #eee; padding: 8px; border-radius: 4px; font-size: 11px; max-height: 200px; overflow: auto; }
+</style>
+</head>
+<body>
+
+<h2>Windows Update Control <span id="cfgState" class="pill">prêt</span></h2>
+
+<div class="cols">
+  <div class="col">
+    <h3>Postes <span id="agentCount" class="pill">0</span></h3>
+    <div class="bar" style="padding:6px 8px;border-bottom:1px solid #eee">
+      <input type="text" id="agentFilter" placeholder="Filtrer (nom, salle, OS)…">
+      <button id="refreshAgents">↻</button>
+    </div>
+    <div class="body" id="agentList"><div class="empty">Chargement…</div></div>
+  </div>
+
+  <div class="col">
+    <h3 id="rightTitle">Sélectionne un poste</h3>
+    <div id="rightBody" class="body"><div class="empty">Choisis un poste à gauche pour interroger Windows Update.</div></div>
+  </div>
+</div>
+
+<script>
+  function $(id) { return document.getElementById(id); }
+  function api(action, params, body) {
+    var qs = 'action=' + encodeURIComponent(action);
+    if (params) Object.keys(params).forEach(function (k) { qs += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]); });
+    if (body) qs += '&payload=' + encodeURIComponent(JSON.stringify(body));
+    return fetch('/pluginadmin.ashx?pin=updatectl&' + qs, { credentials: 'include' }).then(function (r) { return r.json(); });
+  }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+    });
+  }
+  function humanSize(n) {
+    if (!n) return '';
+    if (n < 1024) return n + ' o';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' Ko';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' Mo';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' Go';
+  }
+
+  var agents = [];
+  var selectedId = null;
+  var lastInventory = null;
+  var selectedUpdates = {};  // id -> true
+
+  function loadAgents() {
+    api('agents').then(function (r) {
+      if (r.error) {
+        $('agentList').innerHTML = '<div class="empty" style="color:#721c24">' + escapeHtml(r.error) + '</div>';
+        return;
+      }
+      agents = r.agents || [];
+      renderAgents();
+    });
+  }
+
+  function renderAgents() {
+    var q = ($('agentFilter').value || '').toLowerCase().trim();
+    var rows = agents.filter(function (a) {
+      if (!q) return true;
+      return [a.name, a.mesh, a.os].some(function (v) { return (v || '').toLowerCase().indexOf(q) !== -1; });
+    });
+    $('agentCount').textContent = rows.length + (rows.length !== agents.length ? ' / ' + agents.length : '');
+    if (!rows.length) { $('agentList').innerHTML = '<div class="empty">Aucun poste.</div>'; return; }
+    $('agentList').innerHTML = rows.map(function (a) {
+      var sel = (a.id === selectedId) ? ' selected' : '';
+      var dot = a.online ? 'on' : 'off';
+      return '<div class="row' + sel + '" data-id="' + escapeHtml(a.id) + '">'
+           +   '<span class="statusDot ' + dot + '" title="' + (a.online ? 'En ligne' : 'Hors-ligne') + '"></span>'
+           +   '<div class="name">'
+           +     '<div>' + escapeHtml(a.name) + '</div>'
+           +     '<div class="sub">' + escapeHtml(a.mesh) + ' · ' + escapeHtml(a.os) + '</div>'
+           +   '</div>'
+           + '</div>';
+    }).join('');
+    Array.prototype.forEach.call($('agentList').querySelectorAll('.row'), function (r) {
+      r.onclick = function () {
+        var id = r.getAttribute('data-id');
+        selectedId = id;
+        selectedUpdates = {};
+        renderAgents();
+        startInventory(id);
+      };
+    });
+  }
+
+  function startInventory(nodeId) {
+    var ag = agents.find(function (a) { return a.id === nodeId; });
+    if (!ag) return;
+    $('rightTitle').innerHTML = '🔍 Inventaire — ' + escapeHtml(ag.name);
+    $('rightBody').innerHTML = '<div class="empty">Interrogation de l\'agent (jusqu\'à 5 min)…<br><br>Scan Windows Update en cours, ne ferme pas la page.</div>';
+    if (!ag.online) {
+      $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Poste hors-ligne — impossible d\'interroger Windows Update.</div>';
+      return;
+    }
+    api('inventory', { nodeId: nodeId }).then(function (r) {
+      if (!r.ok) {
+        $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error || 'inconnue') + '</div>'
+          + (r.raw ? '<pre>' + escapeHtml(r.raw) + '</pre>' : '');
+        return;
+      }
+      lastInventory = r;
+      renderInventory(r);
+    });
+  }
+
+  function renderInventory(r) {
+    var info = '<div class="infoBlock">'
+             + '<div class="it"><b>Version</b>' + escapeHtml(r.winver || '?') + ' ' + escapeHtml(r.displayVersion || '') + (r.ubr ? ' (UBR ' + escapeHtml(r.ubr) + ')' : '') + '</div>'
+             + '<div class="it"><b>Dernière MAJ</b>' + escapeHtml(r.lastInstall || '?') + '</div>'
+             + '<div class="it"><b>Reboot pending</b>' + (r.rebootPending ? '<span class="badge danger">OUI</span>' : 'non') + '</div>'
+             + '<div class="it"><b>MAJ en attente</b>' + (r.updates || []).length + '</div>'
+             + '</div>';
+
+    var ups = r.updates || [];
+    var tools = '<div class="toolbar">'
+              + '<button id="selAll">Tout cocher</button>'
+              + '<button id="selNone">Tout décocher</button>'
+              + '<span style="flex:1"></span>'
+              + '<button id="installSel" class="primary" disabled>⬇ Installer la sélection</button>'
+              + '<button id="installAll">⬇ Tout installer</button>'
+              + '</div>';
+
+    var tbl;
+    if (!ups.length) {
+      tbl = '<div class="empty" style="color:#0a6b1a">✓ Aucune mise à jour en attente.</div>';
+    } else {
+      tbl = '<table class="updTable"><thead><tr>'
+          + '<th style="width:30px"></th>'
+          + '<th>Titre</th>'
+          + '<th>KB</th>'
+          + '<th>Sévérité</th>'
+          + '<th>Taille</th>'
+          + '<th>DL</th>'
+          + '</tr></thead><tbody>';
+      ups.forEach(function (u) {
+        var sevCls = (u.severity === 'Critical' || u.severity === 'Important') ? ('sev-' + u.severity) : '';
+        tbl += '<tr>'
+             + '<td><input type="checkbox" class="upChk" data-id="' + escapeHtml(u.id) + '"></td>'
+             + '<td>' + escapeHtml(u.title || '') + '</td>'
+             + '<td>' + escapeHtml(u.kb || '') + '</td>'
+             + '<td class="' + sevCls + '">' + escapeHtml(u.severity || '') + '</td>'
+             + '<td>' + humanSize(u.size) + '</td>'
+             + '<td>' + (u.downloaded ? '✓' : '') + '</td>'
+             + '</tr>';
+      });
+      tbl += '</tbody></table>';
+    }
+
+    $('rightBody').innerHTML = info + tools + tbl;
+
+    function refreshSel() {
+      var count = Object.keys(selectedUpdates).length;
+      var b = document.getElementById('installSel');
+      if (b) { b.disabled = count === 0; b.textContent = '⬇ Installer la sélection' + (count ? ' (' + count + ')' : ''); }
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('.upChk'), function (c) {
+      c.onchange = function () {
+        var id = c.getAttribute('data-id');
+        if (c.checked) selectedUpdates[id] = true; else delete selectedUpdates[id];
+        refreshSel();
+      };
+    });
+    var bAll = document.getElementById('selAll');
+    if (bAll) bAll.onclick = function () {
+      ups.forEach(function (u) { selectedUpdates[u.id] = true; });
+      Array.prototype.forEach.call(document.querySelectorAll('.upChk'), function (c) { c.checked = true; });
+      refreshSel();
+    };
+    var bNone = document.getElementById('selNone');
+    if (bNone) bNone.onclick = function () {
+      selectedUpdates = {};
+      Array.prototype.forEach.call(document.querySelectorAll('.upChk'), function (c) { c.checked = false; });
+      refreshSel();
+    };
+    var bSel = document.getElementById('installSel');
+    if (bSel) bSel.onclick = function () { doInstall(false); };
+    var bInsAll = document.getElementById('installAll');
+    if (bInsAll) bInsAll.onclick = function () { doInstall(true); };
+    refreshSel();
+  }
+
+  function doInstall(all) {
+    if (!selectedId) return;
+    var updateIds = Object.keys(selectedUpdates);
+    var verb = all ? ('TOUTES les ' + ((lastInventory && lastInventory.updates) || []).length + ' MAJ') : (updateIds.length + ' MAJ sélectionnée(s)');
+    if (!confirm('Installer ' + verb + ' ?\n\nLe download + install peut prendre 30-60 min. Reste connecté à la page pour voir le résultat (l\'agent travaille en arrière-plan même si tu fermes la fenêtre).')) return;
+    $('rightBody').innerHTML = '<div class="empty">⬇ Installation en cours (jusqu\'à 60 min)…<br><br>' + escapeHtml(verb) + '</div>';
+    api('install', null, { nodeId: selectedId, updateIds: updateIds, all: all }).then(function (r) {
+      if (!r.ok && r.error && !(r.installed || r.failed)) {
+        $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error) + '</div>'
+          + (r.raw ? '<pre>' + escapeHtml(r.raw) + '</pre>' : '');
+        return;
+      }
+      var installed = r.installed || [];
+      var failed = r.failed || [];
+      var html = '<div class="infoBlock">'
+               + '<div class="it"><b>Installées</b>' + installed.length + '</div>'
+               + '<div class="it"><b>Échouées</b>' + failed.length + '</div>'
+               + '<div class="it"><b>Reboot requis</b>' + (r.rebootRequired ? '<span class="badge danger">OUI</span>' : 'non') + '</div>'
+               + '</div>';
+      if (installed.length) {
+        html += '<div style="padding:10px"><b>✓ Installées :</b><ul>' + installed.map(function (u) { return '<li>' + escapeHtml(u.title) + '</li>'; }).join('') + '</ul></div>';
+      }
+      if (failed.length) {
+        html += '<div style="padding:10px;color:#721c24"><b>✗ Échouées :</b><ul>' + failed.map(function (u) { return '<li>' + escapeHtml(u.title) + ' — ' + escapeHtml(u.error || '') + '</li>'; }).join('') + '</ul></div>';
+      }
+      if (r.raw) html += '<pre>' + escapeHtml(r.raw) + '</pre>';
+      html += '<div style="padding:10px"><button onclick="startInventory(\'' + escapeHtml(selectedId) + '\')">↻ Refaire l\'inventaire</button></div>';
+      $('rightBody').innerHTML = html;
+    }).catch(function (e) {
+      $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(e.message) + '</div>';
+    });
+  }
+
+  $('agentFilter').oninput = renderAgents;
+  $('refreshAgents').onclick = loadAgents;
+  loadAgents();
+</script>
+</body>
+</html>

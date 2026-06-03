@@ -53,6 +53,7 @@
     </div>
     <div class="bar" style="padding:6px 8px;border-bottom:1px solid #eee;background:#fafafa">
       <button id="prefetchBtn" title="Scanner en parallèle tous les postes en ligne visibles ci-dessous (max 8 simultanés)">⚡ Pré-charger visibles</button>
+      <button id="installsBtn" title="Voir toutes les installs en cours et récentes">📋 Tâches</button>
       <span id="prefetchStatus" style="font-size:11px;color:#666;flex:1"></span>
     </div>
     <div class="body" id="agentList"><div class="empty">Chargement…</div></div>
@@ -93,7 +94,9 @@
   var lastInventory = null;
   var selectedUpdates = {};  // id -> true
   var cacheMap = {};   // nodeId -> { age, updates, rebootPending }
-  var inflightSet = {}; // nodeId -> true
+  var inflightSet = {}; // nodeId -> true scan
+  var installsMap = {}; // dispatchId -> install entry
+  var installsByNode = {}; // nodeId -> array of install entries
 
   function loadAgents() {
     api('agents').then(function (r) {
@@ -118,7 +121,11 @@
       var sel = (a.id === selectedId) ? ' selected' : '';
       var dot = a.online ? 'on' : 'off';
       var badge = '';
-      if (inflightSet[a.id]) {
+      var nodeInstalls = installsByNode[a.id] || [];
+      var runningInstall = nodeInstalls.find(function (it) { return it.status === 'running'; });
+      if (runningInstall) {
+        badge = '<span style="font-size:10px;color:#d68910" title="Install MAJ en cours">🔧</span>';
+      } else if (inflightSet[a.id]) {
         badge = '<span style="font-size:10px;color:#0d6efd" title="Scan en cours">⏳</span>';
       } else if (cacheMap[a.id]) {
         var c = cacheMap[a.id];
@@ -293,12 +300,88 @@
   }
 
   function pollCache() {
-    api('cacheStatus').then(function (r) {
+    Promise.all([api('cacheStatus'), api('installs')]).then(function (rs) {
+      var r = rs[0] || {};
       cacheMap = r.cache || {};
       inflightSet = {};
       (r.inflight || []).forEach(function (id) { inflightSet[id] = true; });
+      var ri = rs[1] || {};
+      installsMap = ri.installs || {};
+      installsByNode = {};
+      Object.keys(installsMap).forEach(function (id) {
+        var it = installsMap[id];
+        if (!installsByNode[it.nodeId]) installsByNode[it.nodeId] = [];
+        installsByNode[it.nodeId].push(Object.assign({ dispatchId: id }, it));
+      });
       renderAgents();
+      // Si la modale Tâches est ouverte, rafraîchit son contenu.
+      var open = document.getElementById('installsModal');
+      if (open) renderInstallsModal(open);
     });
+  }
+
+  function openInstallsModal() {
+    var bg = document.createElement('div');
+    bg.id = 'installsModal';
+    bg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;display:flex;align-items:center;justify-content:center';
+    bg.innerHTML = '<div style="background:#fff;border-radius:6px;max-width:900px;width:95%;max-height:80vh;display:flex;flex-direction:column">'
+                 + '<div style="padding:10px;border-bottom:1px solid #ddd;display:flex;align-items:center"><h3 style="margin:0;flex:1">📋 Tâches d\'installation</h3>'
+                 + '<button onclick="document.body.removeChild(document.getElementById(\'installsModal\'))">Fermer</button></div>'
+                 + '<div id="installsBody" style="overflow:auto;padding:10px"></div>'
+                 + '</div>';
+    bg.onclick = function (e) { if (e.target === bg) document.body.removeChild(bg); };
+    document.body.appendChild(bg);
+    renderInstallsModal(bg);
+  }
+  function renderInstallsModal(bg) {
+    var body = bg.querySelector('#installsBody');
+    var nameById = {};
+    agents.forEach(function (a) { nameById[a.id] = a.name; });
+    var list = Object.keys(installsMap).map(function (id) { return Object.assign({ dispatchId: id }, installsMap[id]); });
+    list.sort(function (a, b) { return (b.ts || 0) - (a.ts || 0); });
+    if (!list.length) { body.innerHTML = '<div style="color:#999;text-align:center;padding:20px">Aucune tâche.</div>'; return; }
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'
+             + '<th style="padding:4px;border-bottom:2px solid #ccc;text-align:left">Poste</th>'
+             + '<th style="padding:4px;border-bottom:2px solid #ccc;text-align:left">Quand</th>'
+             + '<th style="padding:4px;border-bottom:2px solid #ccc;text-align:left">Statut</th>'
+             + '<th style="padding:4px;border-bottom:2px solid #ccc;text-align:left">Mode</th>'
+             + '<th style="padding:4px;border-bottom:2px solid #ccc;text-align:left">Résultat</th>'
+             + '<th style="padding:4px;border-bottom:2px solid #ccc;text-align:left">Source</th>'
+             + '<th style="padding:4px;border-bottom:2px solid #ccc"></th>'
+             + '</tr></thead><tbody>';
+    list.forEach(function (it) {
+      var statusBadge;
+      if (it.status === 'running') statusBadge = '<span style="color:#d68910">⏳ en cours</span>';
+      else if (it.status === 'done') statusBadge = '<span style="color:#0a6b1a">✓ terminé</span>';
+      else statusBadge = '<span style="color:#c0392b">✗ échec</span>';
+      var when = new Date(it.ts).toLocaleString();
+      var resultText = '';
+      if (it.result) {
+        var ins = (it.result.installed || []).length;
+        var fail = (it.result.failed || []).length;
+        var reboot = it.result.rebootRequired ? ' 🔄' : '';
+        resultText = ins + ' ok / ' + fail + ' KO' + reboot;
+      } else if (it.error) resultText = escapeHtml(it.error);
+      var src = (it.result && it.result.source) || '';
+      var srcLabel = src === 'wsus' ? '📡 WSUS' : (src === 'windowsupdate' ? '🌐 WU' : '');
+      var clearBtn = (it.status !== 'running')
+        ? '<button onclick="window.__clearInst(\'' + escapeHtml(it.dispatchId) + '\')">×</button>'
+        : '';
+      html += '<tr>'
+            + '<td style="padding:4px;border-bottom:1px solid #f0f0f0">' + escapeHtml(nameById[it.nodeId] || it.nodeId.slice(0,12)) + '</td>'
+            + '<td style="padding:4px;border-bottom:1px solid #f0f0f0;white-space:nowrap">' + escapeHtml(when) + '</td>'
+            + '<td style="padding:4px;border-bottom:1px solid #f0f0f0">' + statusBadge + '</td>'
+            + '<td style="padding:4px;border-bottom:1px solid #f0f0f0">' + escapeHtml(it.mode || '') + (it.mode === 'selection' ? ' (' + (it.updateIds || []).length + ')' : '') + '</td>'
+            + '<td style="padding:4px;border-bottom:1px solid #f0f0f0">' + resultText + '</td>'
+            + '<td style="padding:4px;border-bottom:1px solid #f0f0f0">' + srcLabel + '</td>'
+            + '<td style="padding:4px;border-bottom:1px solid #f0f0f0;text-align:right">' + clearBtn + '</td>'
+            + '</tr>';
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+    window.__clearInst = function (id) {
+      api('clearInstall', { id: id }).then(pollCache);
+    };
   }
 
   function visibleOnlineAgents() {
@@ -345,9 +428,10 @@
   $('agentFilter').oninput = renderAgents;
   $('refreshAgents').onclick = loadAgents;
   $('prefetchBtn').onclick = prefetchVisible;
+  $('installsBtn').onclick = openInstallsModal;
   loadAgents();
   pollCache();
-  setInterval(pollCache, 15000);
+  setInterval(pollCache, 10000);
 </script>
 </body>
 </html>

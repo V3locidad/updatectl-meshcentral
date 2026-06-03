@@ -14,6 +14,26 @@ const crypto = require('crypto');
 
 const inventoryWaiters = {};  // dispatchId -> { res, expires, nodeId }
 const installWaiters = {};    // dispatchId -> { res, expires }
+const stateFile = path.join(__dirname, 'updatectl-state.json');
+let installs = {};            // dispatchId -> { nodeId, nodeName, ts, status, mode, updateIds, result, error, endTs }
+const INSTALL_KEEP_MS = 7 * 24 * 60 * 60 * 1000;  // garde 7 jours d'historique
+
+function loadState() {
+    try {
+        const raw = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+        installs = raw.installs || {};
+        // GC : on retire ce qui est trop vieux ET pas en cours
+        const now = Date.now();
+        Object.keys(installs).forEach((k) => {
+            const it = installs[k];
+            if (it.status !== 'running' && it.endTs && (now - it.endTs) > INSTALL_KEEP_MS) delete installs[k];
+        });
+    } catch (e) { installs = {}; }
+}
+function saveState() {
+    try { fs.writeFileSync(stateFile, JSON.stringify({ installs: installs }, null, 2)); } catch (e) {}
+}
+loadState();
 const inventoryCache = {};    // nodeId -> { ts, data }
 const inventoryInflight = {}; // nodeId -> Promise pour dédupliquer les requêtes simultanées
 const INVENTORY_TTL_MS = 10 * 60 * 1000;
@@ -60,10 +80,7 @@ module.exports.updatectl = function (parent) {
                 return;
             }
             if (command.pluginaction === 'installResult') {
-                const w2 = installWaiters[command.dispatchId];
-                if (!w2) return;
-                delete installWaiters[command.dispatchId];
-                try { sendJson(w2.res, 200, {
+                const result = {
                     ok: !command.error,
                     error: command.error,
                     installed: command.installed || [],
@@ -71,7 +88,22 @@ module.exports.updatectl = function (parent) {
                     rebootRequired: !!command.rebootRequired,
                     source: command.source || 'default',
                     raw: command.raw || '',
-                }); } catch (e) {}
+                };
+                // Persistance : qu'on ait ou non un waiter HTTP, on enregistre.
+                const it = installs[command.dispatchId];
+                if (it) {
+                    it.status = result.ok ? 'done' : 'fail';
+                    it.endTs = Date.now();
+                    it.result = result;
+                    // Invalide le cache inventory du node : ses MAJ ont changé
+                    if (it.nodeId && inventoryCache[it.nodeId]) delete inventoryCache[it.nodeId];
+                    saveState();
+                }
+                const w2 = installWaiters[command.dispatchId];
+                if (w2) {
+                    delete installWaiters[command.dispatchId];
+                    try { sendJson(w2.res, 200, result); } catch (e) {}
+                }
                 return;
             }
         } catch (e) { console.log('updatectl serveraction: ' + e.message); }
@@ -192,24 +224,67 @@ module.exports.updatectl = function (parent) {
             if (!target || typeof target.send !== 'function') return sendJson(res, 200, { ok: false, error: 'agent déconnecté' });
             const dispatchId = 'ins-' + crypto.randomBytes(8).toString('hex');
             installWaiters[dispatchId] = { res: res, expires: Date.now() + 3600000 };
+            // Persistance immédiate : on enregistre l'install comme "running"
+            // pour que la liste survive à un refresh / déconnexion du browser.
+            const nodeNameLookup = (function () {
+                try {
+                    const wsa = obj.meshServer.webserver.wsagents[nodeId];
+                    if (wsa && wsa.dbNodeKey) return wsa.dbNodeKey;
+                } catch (_) {}
+                return null;
+            })();
+            installs[dispatchId] = {
+                nodeId: nodeId,
+                ts: Date.now(),
+                status: 'running',
+                mode: installAll ? 'all' : 'selection',
+                updateIds: updateIds,
+            };
+            saveState();
             setTimeout(() => {
                 const w = installWaiters[dispatchId];
                 if (!w) return;
                 delete installWaiters[dispatchId];
-                try { sendJson(w.res, 200, { ok: false, error: 'timeout agent (60 min)' }); } catch (_) {}
+                // L'install n'est PAS marquée échouée ici : l'agent peut encore
+                // finir et envoyer son résultat ; on libère juste la connexion HTTP.
+                try { sendJson(w.res, 200, { ok: false, error: 'timeout HTTP (60 min) — install peut continuer côté agent, consulte la liste des tâches' }); } catch (_) {}
             }, 3600000);
             try {
                 target.send(JSON.stringify({
                     action: 'plugin', plugin: 'updatectl', pluginaction: 'install',
                     dispatchId: dispatchId,
                     updateIds: updateIds, all: installAll,
-                    bypassWsus: !!payload.bypassWsus,
                 }));
             } catch (e) {
                 delete installWaiters[dispatchId];
+                installs[dispatchId].status = 'fail';
+                installs[dispatchId].endTs = Date.now();
+                installs[dispatchId].error = e.message;
+                saveState();
                 return sendJson(res, 200, { ok: false, error: e.message });
             }
             return;
+        }
+
+        if (action === 'installs') {
+            // Liste des installs (running + récentes). Optionnel : ?nodeId=X
+            // pour filtrer.
+            const nid = String(req.query.nodeId || '');
+            const out = {};
+            Object.keys(installs).forEach((k) => {
+                if (nid && installs[k].nodeId !== nid) return;
+                out[k] = installs[k];
+            });
+            return sendJson(res, 200, { installs: out });
+        }
+
+        if (action === 'clearInstall') {
+            const id = String(req.query.id || '');
+            if (id && installs[id] && installs[id].status !== 'running') {
+                delete installs[id];
+                saveState();
+            }
+            return sendJson(res, 200, { ok: true });
         }
 
         return sendJson(res, 404, { error: 'action inconnue: ' + action });

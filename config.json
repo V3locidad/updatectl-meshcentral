@@ -1,7 +1,7 @@
 {
   "name": "updatectl",
   "shortName": "updatectl",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "author": "V3locidad",
   "description": "Inventaire et installation des Windows Updates à distance via MeshCentral (COM Microsoft.Update.Session, fonctionne en SYSTEM).",
   "hasAdminPanel": true,

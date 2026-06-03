@@ -122,7 +122,18 @@ function doInventory(args) {
         '$ProgressPreference = "SilentlyContinue"',
         '$WarningPreference = "SilentlyContinue"',
         '$VerbosePreference = "SilentlyContinue"',
-        'function J($o){ $o | ConvertTo-Json -Compress -Depth 6 | Set-Content -Path $env:UPDATECTL_OUT -Encoding UTF8 }',
+        // Sortie : JSON ASCII-pur (les non-ASCII sont échappés en \uXXXX).
+        // Évite tout problème d'encoding entre PS (UTF-8 BOM), MeshAgent
+        // Duktape et le navigateur.
+        'function J($o){',
+        '  $json = $o | ConvertTo-Json -Compress -Depth 6',
+        '  $sb = New-Object System.Text.StringBuilder',
+        '  foreach ($c in $json.ToCharArray()) {',
+        '    $code = [int]$c',
+        '    if ($code -gt 127) { [void]$sb.AppendFormat("\\u{0:x4}", $code) } else { [void]$sb.Append($c) }',
+        '  }',
+        '  [System.IO.File]::WriteAllText($env:UPDATECTL_OUT, $sb.ToString(), [System.Text.Encoding]::ASCII)',
+        '}',
         '$result = @{ updates = @(); winver = ""; displayVersion = ""; ubr = ""; lastInstall = ""; rebootPending = $false; error = $null }',
         // Bypass WSUS = neutralise la GPO DoNotConnectToWindowsUpdateInternetLocations
         // le temps de la requête, on restaure ensuite.
@@ -211,7 +222,18 @@ function doInstall(args) {
         '$ProgressPreference = "SilentlyContinue"',
         '$WarningPreference = "SilentlyContinue"',
         '$VerbosePreference = "SilentlyContinue"',
-        'function J($o){ $o | ConvertTo-Json -Compress -Depth 6 | Set-Content -Path $env:UPDATECTL_OUT -Encoding UTF8 }',
+        // Sortie : JSON ASCII-pur (les non-ASCII sont échappés en \uXXXX).
+        // Évite tout problème d'encoding entre PS (UTF-8 BOM), MeshAgent
+        // Duktape et le navigateur.
+        'function J($o){',
+        '  $json = $o | ConvertTo-Json -Compress -Depth 6',
+        '  $sb = New-Object System.Text.StringBuilder',
+        '  foreach ($c in $json.ToCharArray()) {',
+        '    $code = [int]$c',
+        '    if ($code -gt 127) { [void]$sb.AppendFormat("\\u{0:x4}", $code) } else { [void]$sb.Append($c) }',
+        '  }',
+        '  [System.IO.File]::WriteAllText($env:UPDATECTL_OUT, $sb.ToString(), [System.Text.Encoding]::ASCII)',
+        '}',
         '$wanted = @(' + idsList + ')',
         '$all = $' + (all ? 'true' : 'false'),
         '$bypass = $' + (bypassWsus ? 'true' : 'false'),

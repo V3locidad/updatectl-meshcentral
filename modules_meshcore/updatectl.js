@@ -53,43 +53,25 @@ function toStr(buf) {
 }
 
 function runPs(script, timeoutMs, cb) {
-    // Stratégie : on passe un chemin de fichier de sortie via la variable
-    // d'environnement UPDATECTL_OUT. Le script PowerShell écrit son JSON
-    // dedans (Set-Content). On ne lit plus du tout stdout/stderr (qui
-    // peuvent être pollués par du CLIXML quand PS est lancé sous SYSTEM).
-    // PowerShell encodé en Base64 UTF-16LE pour éviter tout problème de
-    // quoting / encoding du script source.
+    // Stratégie : on écrit le script dans un .ps1 sur disque (UTF-8 BOM pour
+    // que PowerShell lise les accents correctement) et on l'exécute via
+    // `-File`. Le script écrit son JSON dans le fichier pointé par
+    // $env:UPDATECTL_OUT. stdout/stderr de PowerShell sont capturés à part
+    // pour diag, mais pas utilisés pour la valeur de retour.
     var fs = require('fs');
     var cp = require('child_process');
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
     var tmpRoot = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
     var stamp = Date.now() + '_' + Math.floor(Math.random() * 1e9);
     var outFile = tmpRoot + '\\updatectl_' + stamp + '.out';
-    var batFile = tmpRoot + '\\updatectl_' + stamp + '.bat';
-    // Base64 UTF-16LE de `script`
-    var b16 = [];
-    for (var i = 0; i < script.length; i++) {
-        var c = script.charCodeAt(i);
-        b16.push(c & 0xff, (c >> 8) & 0xff);
-    }
-    var b64 = '';
-    try {
-        if (typeof Buffer !== 'undefined' && Buffer.from) b64 = Buffer.from(b16).toString('base64');
-    } catch (_) {}
-    if (!b64) {
-        // Fallback Duktape : encodage base64 manuel
-        var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-        for (var j = 0; j < b16.length; j += 3) {
-            var b1 = b16[j] | 0, b2 = b16[j+1] | 0, b3 = b16[j+2] | 0;
-            b64 += chars.charAt(b1 >> 2);
-            b64 += chars.charAt(((b1 & 3) << 4) | (b2 >> 4));
-            b64 += (j + 1 < b16.length) ? chars.charAt(((b2 & 15) << 2) | (b3 >> 6)) : '=';
-            b64 += (j + 2 < b16.length) ? chars.charAt(b3 & 63) : '=';
-        }
-    }
-    var psExe = windir + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
     var errFile = outFile + '.err';
-    var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive -EncodedCommand ' + b64 + ' > "' + errFile + '" 2>&1';
+    var ps1File = tmpRoot + '\\updatectl_' + stamp + '.ps1';
+    var batFile = tmpRoot + '\\updatectl_' + stamp + '.bat';
+    // UTF-8 BOM puis script texte. Évite tout encoding mojibake côté PS.
+    try { fs.writeFileSync(ps1File, '﻿' + script); }
+    catch (e) { return cb(e, ''); }
+    var psExe = windir + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "' + ps1File + '" > "' + errFile + '" 2>&1';
     try {
         fs.writeFileSync(batFile,
             '@echo off\r\n' +
@@ -110,6 +92,7 @@ function runPs(script, timeoutMs, cb) {
             try { if (fs.existsSync(errFile)) errOut = toStr(fs.readFileSync(errFile, 'utf8')); } catch (_) {}
             try { fs.unlinkSync(outFile); } catch (_) {}
             try { fs.unlinkSync(errFile); } catch (_) {}
+            try { fs.unlinkSync(ps1File); } catch (_) {}
             try { fs.unlinkSync(batFile); } catch (_) {}
             // Si UPDATECTL_OUT n'a rien produit, on rabat sur le stderr de PS
             // (typiquement : erreur d'init avant le J final).

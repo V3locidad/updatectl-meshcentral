@@ -84,7 +84,10 @@ function runPs(script, timeoutMs, cb) {
         }
     }
     var psExe = windir + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
-    var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + b64 + ' > "' + outFile + '" 2>&1';
+    // -OutputFormat Text : sinon PowerShell encode la stderr en CLIXML quand
+    // on redirige 2>&1, ce qui pollue la sortie. -InputFormat None évite que
+    // PS bloque en attendant stdin.
+    var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive -OutputFormat Text -InputFormat None -EncodedCommand ' + b64 + ' > "' + outFile + '" 2>&1';
     try { fs.writeFileSync(batFile, '@echo off\r\n' + line + '\r\n'); }
     catch (e) { return cb(e, ''); }
     var exe = windir + '\\System32\\cmd.exe';
@@ -119,6 +122,9 @@ function doInventory(args) {
     // Script : enumère les MAJ en attente, infos OS, reboot pending.
     var ps = [
         '$ErrorActionPreference = "Stop"',
+        '$ProgressPreference = "SilentlyContinue"',
+        '$WarningPreference = "SilentlyContinue"',
+        '$VerbosePreference = "SilentlyContinue"',
         'function J($o){ $o | ConvertTo-Json -Compress -Depth 6 }',
         '$result = @{ updates = @(); winver = ""; displayVersion = ""; ubr = ""; lastInstall = ""; rebootPending = $false; error = $null }',
         'try {',
@@ -179,6 +185,9 @@ function doInstall(args) {
     var idsList = ids.map(function (s) { return "'" + s.replace(/'/g, "''") + "'"; }).join(',');
     var ps = [
         '$ErrorActionPreference = "Stop"',
+        '$ProgressPreference = "SilentlyContinue"',
+        '$WarningPreference = "SilentlyContinue"',
+        '$VerbosePreference = "SilentlyContinue"',
         'function J($o){ $o | ConvertTo-Json -Compress -Depth 6 }',
         '$wanted = @(' + idsList + ')',
         '$all = $' + (all ? 'true' : 'false'),

@@ -49,7 +49,11 @@
     <h3>Postes <span id="agentCount" class="pill">0</span></h3>
     <div class="bar" style="padding:6px 8px;border-bottom:1px solid #eee">
       <input type="text" id="agentFilter" placeholder="Filtrer (nom, salle, OS)…">
-      <button id="refreshAgents">↻</button>
+      <button id="refreshAgents" title="Recharger la liste">↻</button>
+    </div>
+    <div class="bar" style="padding:6px 8px;border-bottom:1px solid #eee;background:#fafafa">
+      <button id="prefetchBtn" title="Scanner en parallèle tous les postes en ligne visibles ci-dessous (max 8 simultanés)">⚡ Pré-charger visibles</button>
+      <span id="prefetchStatus" style="font-size:11px;color:#666;flex:1"></span>
     </div>
     <div class="body" id="agentList"><div class="empty">Chargement…</div></div>
   </div>
@@ -90,6 +94,8 @@
   var lastInventory = null;
   var selectedUpdates = {};  // id -> true
   var bypassWsus = false;
+  var cacheMap = {};   // nodeId -> { age, updates, rebootPending }
+  var inflightSet = {}; // nodeId -> true
 
   function loadAgents() {
     api('agents').then(function (r) {
@@ -113,10 +119,20 @@
     $('agentList').innerHTML = rows.map(function (a) {
       var sel = (a.id === selectedId) ? ' selected' : '';
       var dot = a.online ? 'on' : 'off';
+      var badge = '';
+      if (inflightSet[a.id]) {
+        badge = '<span style="font-size:10px;color:#0d6efd" title="Scan en cours">⏳</span>';
+      } else if (cacheMap[a.id]) {
+        var c = cacheMap[a.id];
+        var cnt = c.updates;
+        var color = cnt === 0 ? '#0a6b1a' : (cnt > 10 ? '#c0392b' : '#d68910');
+        var rb = c.rebootPending ? ' 🔄' : '';
+        badge = '<span style="font-size:10px;color:' + color + '" title="' + cnt + ' MAJ en cache (' + Math.round(c.age/1000) + 's)">⚡' + cnt + rb + '</span>';
+      }
       return '<div class="row' + sel + '" data-id="' + escapeHtml(a.id) + '">'
            +   '<span class="statusDot ' + dot + '" title="' + (a.online ? 'En ligne' : 'Hors-ligne') + '"></span>'
            +   '<div class="name">'
-           +     '<div>' + escapeHtml(a.name) + '</div>'
+           +     '<div>' + escapeHtml(a.name) + ' ' + badge + '</div>'
            +     '<div class="sub">' + escapeHtml(a.mesh) + ' · ' + escapeHtml(a.os) + '</div>'
            +   '</div>'
            + '</div>';
@@ -132,16 +148,20 @@
     });
   }
 
-  function startInventory(nodeId) {
+  function startInventory(nodeId, forceRefresh) {
     var ag = agents.find(function (a) { return a.id === nodeId; });
     if (!ag) return;
-    $('rightTitle').innerHTML = '🔍 Inventaire — ' + escapeHtml(ag.name);
-    $('rightBody').innerHTML = '<div class="empty">Interrogation de l\'agent (jusqu\'à 5 min)…<br><br>Scan Windows Update en cours, ne ferme pas la page.</div>';
+    var refreshBtn = ' <button onclick="window.__refreshInv()" style="font-weight:normal;font-size:11px">↻ Forcer un nouveau scan</button>';
+    $('rightTitle').innerHTML = '🔍 Inventaire — ' + escapeHtml(ag.name) + refreshBtn;
+    window.__refreshInv = function () { startInventory(nodeId, true); };
+    $('rightBody').innerHTML = '<div class="empty">Interrogation de l\'agent…<br><br>(cache ou nouveau scan jusqu\'à 5 min)</div>';
     if (!ag.online) {
       $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Poste hors-ligne — impossible d\'interroger Windows Update.</div>';
       return;
     }
-    api('inventory', { nodeId: nodeId, bypassWsus: bypassWsus ? '1' : '0' }).then(function (r) {
+    var params = { nodeId: nodeId, bypassWsus: bypassWsus ? '1' : '0' };
+    if (forceRefresh) params.refresh = '1';
+    api('inventory', params).then(function (r) {
       if (!r.ok) {
         var hint = '';
         if (r.error && /8024401F|8024500C|WSUS|proxy|redirector/i.test(r.error)) {
@@ -271,13 +291,66 @@
     });
   }
 
+  function pollCache() {
+    api('cacheStatus').then(function (r) {
+      cacheMap = r.cache || {};
+      inflightSet = {};
+      (r.inflight || []).forEach(function (id) { inflightSet[id] = true; });
+      renderAgents();
+    });
+  }
+
+  function visibleOnlineAgents() {
+    var q = ($('agentFilter').value || '').toLowerCase().trim();
+    return agents.filter(function (a) {
+      if (!a.online) return false;
+      if (!q) return true;
+      return [a.name, a.mesh, a.os].some(function (v) { return (v || '').toLowerCase().indexOf(q) !== -1; });
+    });
+  }
+
+  function prefetchVisible() {
+    var pool = visibleOnlineAgents().filter(function (a) { return !cacheMap[a.id] && !inflightSet[a.id]; });
+    if (!pool.length) { $('prefetchStatus').textContent = 'Rien à pré-charger (tout est déjà en cache).'; return; }
+    if (!confirm('Lancer un scan WU en parallèle sur ' + pool.length + ' poste(s) ?\n\n8 simultanés, ~30s-2min par poste. Tu peux naviguer pendant ce temps — les résultats s\'affichent au fur et à mesure (badge ⚡ vert/orange/rouge).')) return;
+    var concurrency = 8;
+    var done = 0, total = pool.length, running = 0;
+    var queue = pool.slice();
+    $('prefetchStatus').textContent = '0/' + total + '…';
+    function next() {
+      while (running < concurrency && queue.length) {
+        var a = queue.shift();
+        running++;
+        inflightSet[a.id] = true;
+        renderAgents();
+        api('inventory', { nodeId: a.id, bypassWsus: bypassWsus ? '1' : '0' }).then(function () {
+          done++; running--;
+          $('prefetchStatus').textContent = done + '/' + total + (queue.length ? ' (' + queue.length + ' en file)' : ' terminé');
+          pollCache();
+          next();
+        }).catch(function () {
+          done++; running--;
+          pollCache(); next();
+        });
+      }
+      if (!queue.length && running === 0) {
+        $('prefetchStatus').textContent = '✓ Terminé : ' + done + '/' + total;
+        pollCache();
+      }
+    }
+    next();
+  }
+
   $('agentFilter').oninput = renderAgents;
   $('refreshAgents').onclick = loadAgents;
+  $('prefetchBtn').onclick = prefetchVisible;
   $('bypassWsus').onchange = function () {
     bypassWsus = $('bypassWsus').checked;
-    if (selectedId) startInventory(selectedId);
+    if (selectedId) startInventory(selectedId, true);
   };
   loadAgents();
+  pollCache();
+  setInterval(pollCache, 15000);
 </script>
 </body>
 </html>

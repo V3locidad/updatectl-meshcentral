@@ -12,8 +12,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const inventoryWaiters = {};  // dispatchId -> { res, expires }
+const inventoryWaiters = {};  // dispatchId -> { res, expires, nodeId }
 const installWaiters = {};    // dispatchId -> { res, expires }
+const inventoryCache = {};    // nodeId -> { ts, data }
+const inventoryInflight = {}; // nodeId -> Promise pour dédupliquer les requêtes simultanées
+const INVENTORY_TTL_MS = 10 * 60 * 1000;
 
 function sendJson(res, code, obj) {
     try { res.status(code).set('Content-Type', 'application/json').end(JSON.stringify(obj)); }
@@ -33,7 +36,7 @@ module.exports.updatectl = function (parent) {
                 const w = inventoryWaiters[command.dispatchId];
                 if (!w) return;
                 delete inventoryWaiters[command.dispatchId];
-                try { sendJson(w.res, 200, {
+                const payload = {
                     ok: !command.error,
                     error: command.error,
                     winver: command.winver || '',
@@ -43,7 +46,15 @@ module.exports.updatectl = function (parent) {
                     rebootPending: !!command.rebootPending,
                     updates: command.updates || [],
                     raw: command.raw || '',
-                }); } catch (e) {}
+                };
+                // Cache si succès — clé = nodeId mémorisé dans le waiter
+                if (w.nodeId && payload.ok) {
+                    inventoryCache[w.nodeId] = { ts: Date.now(), data: payload };
+                }
+                if (w.nodeId) delete inventoryInflight[w.nodeId];
+                // Réponse à TOUS les waiters (Array) accumulés pour ce nodeId
+                const ress = Array.isArray(w.res) ? w.res : [w.res];
+                ress.forEach((r) => { try { sendJson(r, 200, Object.assign({ cached: false }, payload)); } catch (_) {} });
                 return;
             }
             if (command.pluginaction === 'installResult') {
@@ -107,28 +118,63 @@ module.exports.updatectl = function (parent) {
 
         if (action === 'inventory') {
             const nodeId = String(req.query.nodeId || '');
+            const refresh = req.query.refresh === '1';
+            const bypassWsus = req.query.bypassWsus === '1';
+            // Cache hit
+            if (!refresh && inventoryCache[nodeId] && (Date.now() - inventoryCache[nodeId].ts) < INVENTORY_TTL_MS) {
+                return sendJson(res, 200, Object.assign({ cached: true, age: Date.now() - inventoryCache[nodeId].ts }, inventoryCache[nodeId].data));
+            }
+            // Inflight : on attache notre res à la requête en cours pour ce nodeId
+            if (inventoryInflight[nodeId]) {
+                const w = inventoryWaiters[inventoryInflight[nodeId]];
+                if (w) {
+                    if (!Array.isArray(w.res)) w.res = [w.res];
+                    w.res.push(res);
+                    return;
+                }
+                delete inventoryInflight[nodeId];
+            }
             const wsagents = (obj.meshServer.webserver && obj.meshServer.webserver.wsagents) || {};
             const target = wsagents[nodeId];
             if (!target || typeof target.send !== 'function') return sendJson(res, 200, { ok: false, error: 'agent déconnecté' });
             const dispatchId = 'inv-' + crypto.randomBytes(8).toString('hex');
-            inventoryWaiters[dispatchId] = { res: res, expires: Date.now() + 300000 };
+            inventoryWaiters[dispatchId] = { res: [res], expires: Date.now() + 300000, nodeId: nodeId };
+            inventoryInflight[nodeId] = dispatchId;
             setTimeout(() => {
                 const w = inventoryWaiters[dispatchId];
                 if (!w) return;
                 delete inventoryWaiters[dispatchId];
-                try { sendJson(w.res, 200, { ok: false, error: 'timeout agent (5 min)' }); } catch (_) {}
+                delete inventoryInflight[nodeId];
+                const ress = Array.isArray(w.res) ? w.res : [w.res];
+                ress.forEach((r) => { try { sendJson(r, 200, { ok: false, error: 'timeout agent (5 min)' }); } catch (_) {} });
             }, 300000);
             try {
                 target.send(JSON.stringify({
                     action: 'plugin', plugin: 'updatectl', pluginaction: 'inventory',
                     dispatchId: dispatchId,
-                    bypassWsus: req.query.bypassWsus === '1',
+                    bypassWsus: bypassWsus,
                 }));
             } catch (e) {
                 delete inventoryWaiters[dispatchId];
+                delete inventoryInflight[nodeId];
                 return sendJson(res, 200, { ok: false, error: e.message });
             }
             return;
+        }
+
+        // Liste les nodes ayant un inventaire en cache (frais).
+        if (action === 'cacheStatus') {
+            const now = Date.now();
+            const out = {};
+            Object.keys(inventoryCache).forEach((nid) => {
+                const c = inventoryCache[nid];
+                if (now - c.ts < INVENTORY_TTL_MS) {
+                    out[nid] = { age: now - c.ts, updates: (c.data.updates || []).length, rebootPending: !!c.data.rebootPending };
+                }
+            });
+            // Inflight aussi : utile pour l'UI (badge "en cours")
+            const inflight = Object.keys(inventoryInflight);
+            return sendJson(res, 200, { cache: out, inflight: inflight, ttlMs: INVENTORY_TTL_MS });
         }
 
         if (action === 'install') {

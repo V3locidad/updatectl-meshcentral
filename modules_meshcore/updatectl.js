@@ -88,7 +88,8 @@ function runPs(script, timeoutMs, cb) {
         }
     }
     var psExe = windir + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
-    var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive -EncodedCommand ' + b64 + ' >nul 2>nul';
+    var errFile = outFile + '.err';
+    var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive -EncodedCommand ' + b64 + ' > "' + errFile + '" 2>&1';
     try {
         fs.writeFileSync(batFile,
             '@echo off\r\n' +
@@ -104,10 +105,15 @@ function runPs(script, timeoutMs, cb) {
         function finish(err) {
             if (done2) return; done2 = true;
             var out = '';
+            var errOut = '';
             try { if (fs.existsSync(outFile)) out = toStr(fs.readFileSync(outFile, 'utf8')); } catch (_) {}
+            try { if (fs.existsSync(errFile)) errOut = toStr(fs.readFileSync(errFile, 'utf8')); } catch (_) {}
             try { fs.unlinkSync(outFile); } catch (_) {}
+            try { fs.unlinkSync(errFile); } catch (_) {}
             try { fs.unlinkSync(batFile); } catch (_) {}
-            cb(err, out);
+            // Si UPDATECTL_OUT n'a rien produit, on rabat sur le stderr de PS
+            // (typiquement : erreur d'init avant le J final).
+            cb(err, out || errOut);
         }
         child.on('exit', function () { finish(null); });
         setTimeout(function () { try { child.kill(); } catch (_) {} finish('timeout'); }, timeoutMs);

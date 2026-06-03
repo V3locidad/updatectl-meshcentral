@@ -53,6 +53,10 @@ function toStr(buf) {
 }
 
 function runPs(script, timeoutMs, cb) {
+    // Stratégie : on passe un chemin de fichier de sortie via la variable
+    // d'environnement UPDATECTL_OUT. Le script PowerShell écrit son JSON
+    // dedans (Set-Content). On ne lit plus du tout stdout/stderr (qui
+    // peuvent être pollués par du CLIXML quand PS est lancé sous SYSTEM).
     // PowerShell encodé en Base64 UTF-16LE pour éviter tout problème de
     // quoting / encoding du script source.
     var fs = require('fs');
@@ -84,11 +88,14 @@ function runPs(script, timeoutMs, cb) {
         }
     }
     var psExe = windir + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
-    // -OutputFormat Text : sinon PowerShell encode la stderr en CLIXML quand
-    // on redirige 2>&1, ce qui pollue la sortie. -InputFormat None évite que
-    // PS bloque en attendant stdin.
-    var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive -OutputFormat Text -InputFormat None -EncodedCommand ' + b64 + ' > "' + outFile + '" 2>&1';
-    try { fs.writeFileSync(batFile, '@echo off\r\n' + line + '\r\n'); }
+    var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive -EncodedCommand ' + b64 + ' >nul 2>nul';
+    try {
+        fs.writeFileSync(batFile,
+            '@echo off\r\n' +
+            'set "UPDATECTL_OUT=' + outFile + '"\r\n' +
+            line + '\r\n'
+        );
+    }
     catch (e) { return cb(e, ''); }
     var exe = windir + '\\System32\\cmd.exe';
     try {
@@ -125,7 +132,7 @@ function doInventory(args) {
         '$ProgressPreference = "SilentlyContinue"',
         '$WarningPreference = "SilentlyContinue"',
         '$VerbosePreference = "SilentlyContinue"',
-        'function J($o){ $o | ConvertTo-Json -Compress -Depth 6 }',
+        'function J($o){ $o | ConvertTo-Json -Compress -Depth 6 | Set-Content -Path $env:UPDATECTL_OUT -Encoding UTF8 }',
         '$result = @{ updates = @(); winver = ""; displayVersion = ""; ubr = ""; lastInstall = ""; rebootPending = $false; error = $null }',
         'try {',
         '  $reg = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"',
@@ -188,7 +195,7 @@ function doInstall(args) {
         '$ProgressPreference = "SilentlyContinue"',
         '$WarningPreference = "SilentlyContinue"',
         '$VerbosePreference = "SilentlyContinue"',
-        'function J($o){ $o | ConvertTo-Json -Compress -Depth 6 }',
+        'function J($o){ $o | ConvertTo-Json -Compress -Depth 6 | Set-Content -Path $env:UPDATECTL_OUT -Encoding UTF8 }',
         '$wanted = @(' + idsList + ')',
         '$all = $' + (all ? 'true' : 'false'),
         '$result = @{ installed = @(); failed = @(); rebootRequired = $false; error = $null }',

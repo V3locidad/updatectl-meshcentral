@@ -144,7 +144,7 @@
     api('inventory', { nodeId: nodeId, bypassWsus: bypassWsus ? '1' : '0' }).then(function (r) {
       if (!r.ok) {
         var hint = '';
-        if (r.error && /8024401F|WSUS|proxy/i.test(r.error)) {
+        if (r.error && /8024401F|8024500C|WSUS|proxy|redirector/i.test(r.error)) {
           hint = '<div style="margin-top:10px;padding:8px;background:#fff3cd;border-radius:4px;color:#664d03">'
                + 'Astuce : ce poste ne joint pas son WSUS / a un proxy en panne. '
                + 'Coche <b>Bypass WSUS</b> en haut à droite et relance.'

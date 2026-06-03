@@ -60,9 +60,8 @@
 
   <div class="col">
     <h3 id="rightTitle">Sélectionne un poste</h3>
-    <div class="bar" style="padding:6px 10px;border-bottom:1px solid #eee;background:#fbfbfb;font-size:12px">
-      <label title="Force la session WU à parler directement à Windows Update (ignore WSUS local). Utile si le WSUS est en panne ou si le poste a une GPO WSUS cassée."><input type="checkbox" id="bypassWsus"> Bypass WSUS</label>
-      <span style="color:#888;margin-left:8px">— ignore le WSUS configuré sur le poste</span>
+    <div class="bar" style="padding:6px 10px;border-bottom:1px solid #eee;background:#fbfbfb;font-size:11px;color:#666">
+      Scan auto : WSUS d'abord, fallback Windows Update direct si KO. La source réelle est affichée dans le résultat.
     </div>
     <div id="rightBody" class="body"><div class="empty">Choisis un poste à gauche pour interroger Windows Update.</div></div>
   </div>
@@ -93,7 +92,6 @@
   var selectedId = null;
   var lastInventory = null;
   var selectedUpdates = {};  // id -> true
-  var bypassWsus = false;
   var cacheMap = {};   // nodeId -> { age, updates, rebootPending }
   var inflightSet = {}; // nodeId -> true
 
@@ -159,22 +157,14 @@
       $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Poste hors-ligne — impossible d\'interroger Windows Update.</div>';
       return;
     }
-    var params = { nodeId: nodeId, bypassWsus: bypassWsus ? '1' : '0' };
+    var params = { nodeId: nodeId };
     if (forceRefresh) params.refresh = '1';
     api('inventory', params).then(function (r) {
       if (!r.ok) {
-        var hint = '';
-        if (r.error && /8024401F|8024500C|WSUS|proxy|redirector/i.test(r.error)) {
-          hint = '<div style="margin-top:10px;padding:8px;background:#fff3cd;border-radius:4px;color:#664d03">'
-               + 'Astuce : ce poste ne joint pas son WSUS / a un proxy en panne. '
-               + 'Coche <b>Bypass WSUS</b> en haut à droite et relance.'
-               + '</div>';
-        }
-        $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error || 'inconnue') + '</div>'
-          + hint
+        $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Erreur (WSUS + WU direct ont tous deux échoué) : ' + escapeHtml(r.error || 'inconnue') + '</div>'
           + (r.raw ? '<pre>' + escapeHtml(r.raw) + '</pre>' : '')
           + '<div style="padding:10px"><button onclick="window.__retry()">↻ Réessayer</button></div>';
-        window.__retry = function () { startInventory(selectedId); };
+        window.__retry = function () { startInventory(selectedId, true); };
         return;
       }
       lastInventory = r;
@@ -183,11 +173,20 @@
   }
 
   function renderInventory(r) {
+    var src = r.source || 'default';
+    var srcBadge = '';
+    if (src === 'wsus') srcBadge = '<span class="badge" style="background:#cfe2ff;color:#0a58ca">📡 WSUS</span>';
+    else if (src === 'windowsupdate') {
+      srcBadge = r.fallbackError
+        ? '<span class="badge warn" title="WSUS a échoué : ' + escapeHtml(r.fallbackError) + '">🌐 Windows Update (fallback)</span>'
+        : '<span class="badge" style="background:#d1e7dd;color:#0a3622">🌐 Windows Update</span>';
+    } else srcBadge = '<span class="badge">' + escapeHtml(src) + '</span>';
     var info = '<div class="infoBlock">'
+             + '<div class="it"><b>Source</b>' + srcBadge + '</div>'
              + '<div class="it"><b>Version</b>' + escapeHtml(r.winver || '?') + ' ' + escapeHtml(r.displayVersion || '') + (r.ubr ? ' (UBR ' + escapeHtml(r.ubr) + ')' : '') + '</div>'
              + '<div class="it"><b>Dernière MAJ</b>' + escapeHtml(r.lastInstall || '?') + '</div>'
              + '<div class="it"><b>Reboot pending</b>' + (r.rebootPending ? '<span class="badge danger">OUI</span>' : 'non') + '</div>'
-             + '<div class="it"><b>MAJ en attente</b>' + (r.updates || []).length + '</div>'
+             + '<div class="it"><b>MAJ en attente</b>' + (r.updates || []).length + (r.cached ? ' <span class="badge">cache ' + Math.round((r.age||0)/1000) + 's</span>' : '') + '</div>'
              + '</div>';
 
     var ups = r.updates || [];
@@ -264,7 +263,7 @@
     var verb = all ? ('TOUTES les ' + ((lastInventory && lastInventory.updates) || []).length + ' MAJ') : (updateIds.length + ' MAJ sélectionnée(s)');
     if (!confirm('Installer ' + verb + ' ?\n\nLe download + install peut prendre 30-60 min. Reste connecté à la page pour voir le résultat (l\'agent travaille en arrière-plan même si tu fermes la fenêtre).')) return;
     $('rightBody').innerHTML = '<div class="empty">⬇ Installation en cours (jusqu\'à 60 min)…<br><br>' + escapeHtml(verb) + '</div>';
-    api('install', null, { nodeId: selectedId, updateIds: updateIds, all: all, bypassWsus: bypassWsus }).then(function (r) {
+    api('install', null, { nodeId: selectedId, updateIds: updateIds, all: all }).then(function (r) {
       if (!r.ok && r.error && !(r.installed || r.failed)) {
         $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error) + '</div>'
           + (r.raw ? '<pre>' + escapeHtml(r.raw) + '</pre>' : '');
@@ -272,7 +271,9 @@
       }
       var installed = r.installed || [];
       var failed = r.failed || [];
+      var srcLbl = r.source === 'wsus' ? '📡 WSUS' : (r.source === 'windowsupdate' ? '🌐 WU direct' : (r.source || '?'));
       var html = '<div class="infoBlock">'
+               + '<div class="it"><b>Source</b>' + escapeHtml(srcLbl) + '</div>'
                + '<div class="it"><b>Installées</b>' + installed.length + '</div>'
                + '<div class="it"><b>Échouées</b>' + failed.length + '</div>'
                + '<div class="it"><b>Reboot requis</b>' + (r.rebootRequired ? '<span class="badge danger">OUI</span>' : 'non') + '</div>'
@@ -323,7 +324,7 @@
         running++;
         inflightSet[a.id] = true;
         renderAgents();
-        api('inventory', { nodeId: a.id, bypassWsus: bypassWsus ? '1' : '0' }).then(function () {
+        api('inventory', { nodeId: a.id }).then(function () {
           done++; running--;
           $('prefetchStatus').textContent = done + '/' + total + (queue.length ? ' (' + queue.length + ' en file)' : ' terminé');
           pollCache();
@@ -344,10 +345,6 @@
   $('agentFilter').oninput = renderAgents;
   $('refreshAgents').onclick = loadAgents;
   $('prefetchBtn').onclick = prefetchVisible;
-  $('bypassWsus').onchange = function () {
-    bypassWsus = $('bypassWsus').checked;
-    if (selectedId) startInventory(selectedId, true);
-  };
   loadAgents();
   pollCache();
   setInterval(pollCache, 15000);

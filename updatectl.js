@@ -45,6 +45,8 @@ module.exports.updatectl = function (parent) {
                     lastInstall: command.lastInstall || '',
                     rebootPending: !!command.rebootPending,
                     updates: command.updates || [],
+                    source: command.source || 'default',
+                    fallbackError: command.fallbackError || null,
                     raw: command.raw || '',
                 };
                 // Cache si succès — clé = nodeId mémorisé dans le waiter
@@ -67,6 +69,7 @@ module.exports.updatectl = function (parent) {
                     installed: command.installed || [],
                     failed: command.failed || [],
                     rebootRequired: !!command.rebootRequired,
+                    source: command.source || 'default',
                     raw: command.raw || '',
                 }); } catch (e) {}
                 return;

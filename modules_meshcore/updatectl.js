@@ -115,6 +115,7 @@ function parseJsonChunk(out) {
 
 function doInventory(args) {
     var dispatchId = args.dispatchId;
+    var bypassWsus = !!args.bypassWsus;
     // Script : enumère les MAJ en attente, infos OS, reboot pending.
     var ps = [
         '$ErrorActionPreference = "Stop"',
@@ -141,6 +142,9 @@ function doInventory(args) {
         '  } catch {}',
         '  $session = New-Object -ComObject Microsoft.Update.Session',
         '  $searcher = $session.CreateUpdateSearcher()',
+        (bypassWsus
+            ? '  $searcher.ServerSelection = 2  # ssWindowsUpdate (bypass WSUS local)'
+            : '  # ServerSelection par défaut (suit la config WSUS du poste)'),
         '  $sr = $searcher.Search("IsInstalled=0 and IsHidden=0")',
         '  foreach ($u in $sr.Updates) {',
         '    $kb = ""',
@@ -176,6 +180,7 @@ function doInstall(args) {
     var dispatchId = args.dispatchId;
     var all = !!args.all;
     var ids = (args.updateIds || []).map(String);
+    var bypassWsus = !!args.bypassWsus;
     // Script : search again, filter to selected ids (ou tout), download + install,
     // retourne installed[] / failed[] / rebootRequired.
     var idsList = ids.map(function (s) { return "'" + s.replace(/'/g, "''") + "'"; }).join(',');
@@ -191,6 +196,9 @@ function doInstall(args) {
         'try {',
         '  $session = New-Object -ComObject Microsoft.Update.Session',
         '  $searcher = $session.CreateUpdateSearcher()',
+        (bypassWsus
+            ? '  $searcher.ServerSelection = 2  # ssWindowsUpdate (bypass WSUS local)'
+            : '  # ServerSelection par défaut'),
         '  $sr = $searcher.Search("IsInstalled=0 and IsHidden=0")',
         '  $col = New-Object -ComObject Microsoft.Update.UpdateColl',
         '  foreach ($u in $sr.Updates) {',

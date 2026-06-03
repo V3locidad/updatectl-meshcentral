@@ -119,7 +119,11 @@ module.exports.updatectl = function (parent) {
                 try { sendJson(w.res, 200, { ok: false, error: 'timeout agent (5 min)' }); } catch (_) {}
             }, 300000);
             try {
-                target.send(JSON.stringify({ action: 'plugin', plugin: 'updatectl', pluginaction: 'inventory', dispatchId: dispatchId }));
+                target.send(JSON.stringify({
+                    action: 'plugin', plugin: 'updatectl', pluginaction: 'inventory',
+                    dispatchId: dispatchId,
+                    bypassWsus: req.query.bypassWsus === '1',
+                }));
             } catch (e) {
                 delete inventoryWaiters[dispatchId];
                 return sendJson(res, 200, { ok: false, error: e.message });
@@ -150,6 +154,7 @@ module.exports.updatectl = function (parent) {
                     action: 'plugin', plugin: 'updatectl', pluginaction: 'install',
                     dispatchId: dispatchId,
                     updateIds: updateIds, all: installAll,
+                    bypassWsus: !!payload.bypassWsus,
                 }));
             } catch (e) {
                 delete installWaiters[dispatchId];

@@ -55,7 +55,10 @@
   </div>
 
   <div class="col">
-    <h3 id="rightTitle">Sélectionne un poste</h3>
+    <h3 id="rightTitle" style="display:flex;align-items:center;gap:8px">
+      <span style="flex:1">Sélectionne un poste</span>
+      <label style="font-size:11px;font-weight:normal" title="Force la session WU à parler directement à Windows Update (ignore WSUS local). Utile si le WSUS est en panne ou si le poste a une GPO WSUS cassée."><input type="checkbox" id="bypassWsus"> Bypass WSUS</label>
+    </h3>
     <div id="rightBody" class="body"><div class="empty">Choisis un poste à gauche pour interroger Windows Update.</div></div>
   </div>
 </div>
@@ -85,6 +88,7 @@
   var selectedId = null;
   var lastInventory = null;
   var selectedUpdates = {};  // id -> true
+  var bypassWsus = false;
 
   function loadAgents() {
     api('agents').then(function (r) {
@@ -136,10 +140,20 @@
       $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Poste hors-ligne — impossible d\'interroger Windows Update.</div>';
       return;
     }
-    api('inventory', { nodeId: nodeId }).then(function (r) {
+    api('inventory', { nodeId: nodeId, bypassWsus: bypassWsus ? '1' : '0' }).then(function (r) {
       if (!r.ok) {
+        var hint = '';
+        if (r.error && /8024401F|WSUS|proxy/i.test(r.error)) {
+          hint = '<div style="margin-top:10px;padding:8px;background:#fff3cd;border-radius:4px;color:#664d03">'
+               + 'Astuce : ce poste ne joint pas son WSUS / a un proxy en panne. '
+               + 'Coche <b>Bypass WSUS</b> en haut à droite et relance.'
+               + '</div>';
+        }
         $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error || 'inconnue') + '</div>'
-          + (r.raw ? '<pre>' + escapeHtml(r.raw) + '</pre>' : '');
+          + hint
+          + (r.raw ? '<pre>' + escapeHtml(r.raw) + '</pre>' : '')
+          + '<div style="padding:10px"><button onclick="window.__retry()">↻ Réessayer</button></div>';
+        window.__retry = function () { startInventory(selectedId); };
         return;
       }
       lastInventory = r;
@@ -229,7 +243,7 @@
     var verb = all ? ('TOUTES les ' + ((lastInventory && lastInventory.updates) || []).length + ' MAJ') : (updateIds.length + ' MAJ sélectionnée(s)');
     if (!confirm('Installer ' + verb + ' ?\n\nLe download + install peut prendre 30-60 min. Reste connecté à la page pour voir le résultat (l\'agent travaille en arrière-plan même si tu fermes la fenêtre).')) return;
     $('rightBody').innerHTML = '<div class="empty">⬇ Installation en cours (jusqu\'à 60 min)…<br><br>' + escapeHtml(verb) + '</div>';
-    api('install', null, { nodeId: selectedId, updateIds: updateIds, all: all }).then(function (r) {
+    api('install', null, { nodeId: selectedId, updateIds: updateIds, all: all, bypassWsus: bypassWsus }).then(function (r) {
       if (!r.ok && r.error && !(r.installed || r.failed)) {
         $('rightBody').innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error) + '</div>'
           + (r.raw ? '<pre>' + escapeHtml(r.raw) + '</pre>' : '');
@@ -258,6 +272,10 @@
 
   $('agentFilter').oninput = renderAgents;
   $('refreshAgents').onclick = loadAgents;
+  $('bypassWsus').onchange = function () {
+    bypassWsus = $('bypassWsus').checked;
+    if (selectedId) startInventory(selectedId);
+  };
   loadAgents();
 </script>
 </body>
